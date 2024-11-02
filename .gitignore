@@ -1,0 +1,5 @@
+/target
+/dist
+/migrations
+launch.json
+.env
