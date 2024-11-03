@@ -1,15 +1,16 @@
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use actix_multipart::Multipart;
+use futures::StreamExt;
 use serde::Deserialize;
 use actix_cors::Cors;
 use mongodb::bson::doc;
+use sha2::{Sha256, Digest}; 
+use chrono::Datelike;
+use std::io::Write;
+use std::fs::File;
 
 use elogbook::get_db_collection;
-use elogbook::models::{Entry, EntryResponse};
-
-#[derive(Deserialize)]
-struct LogEntry {
-    content: String,
-}
+use elogbook::models::{Attachment, Entry, EntryResponse};
 
 #[derive(Deserialize)]
 struct GetEntriesParams {
@@ -17,19 +18,77 @@ struct GetEntriesParams {
     offset: u64,
 }
 
-async fn add_entry(entry: web::Json<LogEntry>) -> impl Responder {
+async fn add_entry(mut payload: Multipart) -> impl Responder {
 
-    let collection = get_db_collection().await.expect("Failed to connect to the DB.");
-    
-    let new_entry = Entry {
-        id:         None,
-        content:    entry.content.clone(),
+    // Prepare a vacant entry
+    let mut entry = Entry {
+        id: None,
+        content: String::new(),
         created_at: chrono::Utc::now(),
+        attachments: None,
     };
-
-    // Insert this log
-    collection.insert_one(new_entry, None).await.expect("Error saving new entry");
+    // Empty attachments
+    let mut attachments = Vec::new();
     
+    while let Some(item) = payload.next().await {
+        let mut field = item.expect("Error processing multipart field");
+
+        let content_disposition = field.content_disposition().clone();
+        let field_name = content_disposition.get_name().unwrap_or_default();
+
+        // Content
+        if field_name == "content" {
+            while let Some(chunk) = field.next().await {
+                entry.content.push_str(std::str::from_utf8(&chunk.expect("Error getting a log content")).unwrap());
+            }
+        }
+        // Attachments
+        else if field_name == "file" {
+
+            let original_filename = content_disposition.get_filename().unwrap_or("tmpfile");
+            let directory_path = format!("./attachments/{:04}/{:02}/{:02}", 
+                                                    entry.created_at.naive_utc().year(),
+                                                    entry.created_at.naive_utc().month(),
+                                                    entry.created_at.naive_utc().day());
+            
+            // Make a unique (hashed) name
+            let mut hasher = Sha256::new();
+            hasher.update(original_filename);
+            hasher.update(attachments.len().to_string());
+            let hash_result = format!("{:x}", hasher.finalize());
+            let hashed_filename = format!("{}/{}", directory_path, hash_result);
+            
+            let mut f = match File::create(&hashed_filename) {
+                Ok(file) => file,
+                Err(e) => return HttpResponse::InternalServerError().body(format!("Error creating file: {}", e)),
+            };
+            while let Some(chunk) = field.next().await {
+                let data = match chunk {
+                    Ok(d) => d,
+                    Err(e) => return HttpResponse::InternalServerError().body(format!("Error reading data: {}", e)),
+                };
+                if let Err(e) = f.write_all(&data) {
+                    return HttpResponse::InternalServerError().body(format!("Error writing to file: {}", e));
+                }
+            }
+
+            // Create the attachment entry
+            let attachment = Attachment {
+                id: attachments.len() as u32 + 1,
+                saved_path: hashed_filename.clone(),
+                original_name: original_filename.to_string(),
+            };
+            attachments.push(attachment);
+        }
+    }
+    if 0 < attachments.len() {
+        entry.attachments = Some(attachments);
+    }
+
+    // Insert this log entry
+    let collection = get_db_collection().await.expect("Failed to connect to the DB.");
+    collection.insert_one(entry, None).await.expect("Error saving new entry");
+
     HttpResponse::Ok().body("Entry added to database.")
 }
 
@@ -48,10 +107,12 @@ async fn get_entries(params: web::Query<GetEntriesParams>) -> impl Responder{
     let mut results = Vec::new();
 
     while let Some(entry) = cursor.try_next().await.expect("Error parsing entry") {
+
         let entry_response = EntryResponse {
             id:         entry.id.map(|oid| oid.to_hex()),  // ObjectIdをStringに変換
             content:    entry.content,
             created_at: entry.created_at,
+            attachments: entry.attachments,
         };
         results.push(entry_response);
     }
