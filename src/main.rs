@@ -1,8 +1,10 @@
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
-use elogbook::establish_connection;
-use elogbook::models::NewEntry; // models を正しくインポート
 use serde::Deserialize;
 use actix_cors::Cors;
+use mongodb::bson::doc;
+
+use elogbook::get_db_collection;
+use elogbook::models::{Entry, EntryResponse};
 
 #[derive(Deserialize)]
 struct LogEntry {
@@ -12,38 +14,48 @@ struct LogEntry {
 #[derive(Deserialize)]
 struct GetEntriesParams {
     limit:  i64,
-    offset: i64,
+    offset: u64,
 }
 
-pub async fn add_entry(entry: web::Json<LogEntry>) -> impl Responder {
-    use elogbook::schema::entries::dsl::*;
-    use diesel::prelude::*;
+async fn add_entry(entry: web::Json<LogEntry>) -> impl Responder {
 
-    let connection = establish_connection();
-    let new_entry = NewEntry {
-        content: &entry.content,
-    };
+    let collection = get_db_collection().await.expect("Failed to connect to the DB.");
     
-    diesel::insert_into(entries)
-                .values(&new_entry)
-                .execute(&connection)
-                .expect("Error saving new entry");
+    let new_entry = Entry {
+        id:         None,
+        content:    entry.content.clone(),
+        created_at: chrono::Utc::now(),
+    };
+
+    // Insert this log
+    collection.insert_one(new_entry, None).await.expect("Error saving new entry");
     
     HttpResponse::Ok().body("Entry added to database.")
 }
 
-pub async fn get_entries(params: web::Query<GetEntriesParams>) -> impl Responder{
-    use elogbook::schema::entries::dsl::*;
-    use diesel::prelude::*;
+async fn get_entries(params: web::Query<GetEntriesParams>) -> impl Responder{
+    use futures_util::stream::TryStreamExt;  // TryStreamExtのインポート
 
-    let connection = establish_connection();
-    let results = entries
-                    .order_by(id.desc())
-                    .limit(params.limit)
-                    .offset(params.offset)
-                    .load::<(i32, String, chrono::DateTime<chrono::Utc>)>(&connection)
-                    .expect("Error loading entries");
-    //println!("{:?}", results);
+    let collection = get_db_collection().await.expect("Failed to connect to the DB.");
+
+    let find_options = mongodb::options::FindOptions::builder()
+        .sort(mongodb::bson::doc! {"_id": -1})
+        .limit(params.limit)
+        .skip(params.offset)
+        .build();
+
+    let mut cursor = collection.find(None, find_options).await.expect("Error finding entries.");
+    let mut results = Vec::new();
+
+    while let Some(entry) = cursor.try_next().await.expect("Error parsing entry") {
+        let entry_response = EntryResponse {
+            id:         entry.id.map(|oid| oid.to_hex()),  // ObjectIdをStringに変換
+            content:    entry.content,
+            created_at: entry.created_at,
+        };
+        results.push(entry_response);
+    }
+
     HttpResponse::Ok().json(results)
 }
 
