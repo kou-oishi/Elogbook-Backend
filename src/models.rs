@@ -4,9 +4,10 @@ use mongodb::bson::oid::ObjectId;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Attachment {
-    pub id: u32,  // シリアル番号
-    pub saved_path: String,  // 実際にディレクトリに保存されたパス
-    pub original_name: String,  // オリジナルの名前
+    pub id: u32, 
+    pub saved_path: String, 
+    pub original_name: String, 
+    pub mime: String,
 }
 pub type Attachments = Vec<Attachment>;
 

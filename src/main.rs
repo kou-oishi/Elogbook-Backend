@@ -31,8 +31,10 @@ async fn add_entry(mut payload: Multipart) -> impl Responder {
     let mut attachments = Vec::new();
     
     while let Some(item) = payload.next().await {
-        let mut field = item.expect("Error processing multipart field");
+        use std::path::Path;
 
+        let mut field = item.expect("Error processing multipart field");
+        
         let content_disposition = field.content_disposition().clone();
         let field_name = content_disposition.get_name().unwrap_or_default();
 
@@ -44,7 +46,7 @@ async fn add_entry(mut payload: Multipart) -> impl Responder {
         }
         // Attachments
         else if field_name == "file" {
-
+            let mime_type = field.content_type().to_string();
             let original_filename = content_disposition.get_filename().unwrap_or("tmpfile");
             let directory_path = format!("./attachments/{:04}/{:02}/{:02}", 
                                                     entry.created_at.naive_utc().year(),
@@ -53,15 +55,21 @@ async fn add_entry(mut payload: Multipart) -> impl Responder {
             
             // Make a unique (hashed) name
             let mut hasher = Sha256::new();
+            hasher.update(entry.created_at.to_rfc3339().as_bytes());
             hasher.update(original_filename);
             hasher.update(attachments.len().to_string());
             let hash_result = format!("{:x}", hasher.finalize());
-            let hashed_filename = format!("{}/{}", directory_path, hash_result);
+            let mut hashed_filename = format!("{}/{}", directory_path, hash_result);
+            // Extention?
+            if let Some(extention) = Path::new(original_filename).extension() {
+                if let Some(ext_str) = extention.to_str() {
+                    hashed_filename += &format!(".{}", ext_str);
+                }
+            }
             
-            let mut f = match File::create(&hashed_filename) {
-                Ok(file) => file,
-                Err(e) => return HttpResponse::InternalServerError().body(format!("Error creating file: {}", e)),
-            };
+            std::fs::create_dir_all(&directory_path).expect("Cannot make directory");
+            let mut f = File::create(&hashed_filename).expect(&format!("Error creating file: {}", &hashed_filename));
+
             while let Some(chunk) = field.next().await {
                 let data = match chunk {
                     Ok(d) => d,
@@ -77,6 +85,7 @@ async fn add_entry(mut payload: Multipart) -> impl Responder {
                 id: attachments.len() as u32 + 1,
                 saved_path: hashed_filename.clone(),
                 original_name: original_filename.to_string(),
+                mime: mime_type,
             };
             attachments.push(attachment);
         }
@@ -107,7 +116,6 @@ async fn get_entries(params: web::Query<GetEntriesParams>) -> impl Responder{
     let mut results = Vec::new();
 
     while let Some(entry) = cursor.try_next().await.expect("Error parsing entry") {
-
         let entry_response = EntryResponse {
             id:         entry.id.map(|oid| oid.to_hex()),  // ObjectIdをStringに変換
             content:    entry.content,
@@ -116,7 +124,7 @@ async fn get_entries(params: web::Query<GetEntriesParams>) -> impl Responder{
         };
         results.push(entry_response);
     }
-
+    
     HttpResponse::Ok().json(results)
 }
 
@@ -126,6 +134,8 @@ async fn greet() -> impl Responder{
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    use actix_files as fs;
+
     HttpServer::new(|| {
         App::new()
             .wrap(
@@ -134,7 +144,8 @@ async fn main() -> std::io::Result<()> {
                     .allow_any_method()
                     .allow_any_header()
                     .max_age(3600),
-            )   
+            ) 
+            .service(fs::Files::new("/attachments", "./attachments").show_files_listing())
             .route("/", web::get().to(greet))
             .route("/add_entry", web::post().to(add_entry))
             .route("/get_entries", web::get().to(get_entries))
