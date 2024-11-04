@@ -18,6 +18,8 @@ actix-multipart = "0.4"  # actix-multipartを追加
 dotenv = "0.15"
 actix-cors = "0.6"
 sha2 = "0.10"
+lazy_static = "1.4" 
+rand = "0.8" 
 
 [lib]
 name = "elogbook"
