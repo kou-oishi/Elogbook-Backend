@@ -1,5 +1,6 @@
 use actix_cors::Cors;
 use actix_multipart::Multipart;
+use actix_web::http::header::{ContentDisposition, DispositionParam, DispositionType};
 use actix_web::{web, App, Error, HttpRequest, HttpResponse, HttpServer, Responder};
 use chrono::{Datelike, Duration, Utc};
 use futures::StreamExt;
@@ -146,9 +147,7 @@ async fn get_entries(params: web::Query<GetEntriesParams>) -> impl Responder {
         if let Some(attachments) = entry.attachments {
             for attachment in attachments {
                 // Make download URL
-                let download_url =
-                    generate_temporary_download_url(attachment.saved_path.clone()).await;
-
+                let download_url = generate_temporary_download_url(&attachment).await;
                 // Don't pass the saved path to the frontend!
                 attachments_response.push(AttachmentResponse {
                     id: attachment.id,
@@ -177,7 +176,7 @@ lazy_static! {
 }
 
 // 一時的なダウンロードURLを生成
-async fn generate_temporary_download_url(file_path: String) -> String {
+async fn generate_temporary_download_url(attachment: &Attachment) -> String {
     let token: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)
         .take(30)
@@ -188,15 +187,16 @@ async fn generate_temporary_download_url(file_path: String) -> String {
 
     let download_request = DownloadRequest {
         token: token.clone(),
-        file_path,
-        expires_at,
+        file_path: attachment.saved_path.clone(),
+        original_name: attachment.original_name.clone(),
+        expires_at: expires_at,
     };
 
     DOWNLOAD_REQUESTS
         .lock()
         .await
         .insert(token.clone(), download_request);
-    format!("/download/{}", token)
+    format!("download/{}", token)
 }
 
 async fn download_file(req: HttpRequest, path: web::Path<String>) -> Result<HttpResponse, Error> {
@@ -205,8 +205,17 @@ async fn download_file(req: HttpRequest, path: web::Path<String>) -> Result<Http
 
     if let Some(request) = requests.get(&token) {
         if Utc::now() < request.expires_at {
-            return Ok(NamedFile::open_async(&request.file_path)
-                .await?
+            let named_file = NamedFile::open_async(&request.file_path).await?;
+
+            // Return the file with a meta data = the original name
+            return Ok(named_file
+                .use_last_modified(true)
+                .set_content_disposition(actix_web::http::header::ContentDisposition {
+                    disposition: actix_web::http::header::DispositionType::Attachment,
+                    parameters: vec![actix_web::http::header::DispositionParam::Filename(
+                        request.original_name.clone(),
+                    )],
+                })
                 .into_response(&req));
         }
     }

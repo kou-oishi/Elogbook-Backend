@@ -43,5 +43,6 @@ pub struct EntryResponse {
 pub struct DownloadRequest {
     pub token: String,
     pub file_path: String,
+    pub original_name: String,
     pub expires_at: DateTime<Utc>,
 }
