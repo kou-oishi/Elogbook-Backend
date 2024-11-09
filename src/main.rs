@@ -1,8 +1,7 @@
 use actix_cors::Cors;
 use actix_multipart::Multipart;
-use actix_web::http::header::{ContentDisposition, DispositionParam, DispositionType};
-use actix_web::{web, App, Error, HttpRequest, HttpResponse, HttpServer, Responder};
-use chrono::{Datelike, Duration, Utc};
+use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use chrono::Datelike;
 use futures::StreamExt;
 use mongodb::bson::doc;
 use serde::Deserialize;
@@ -10,14 +9,11 @@ use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::Write;
 
-use actix_files::NamedFile;
-use lazy_static::lazy_static;
-use rand::{distributions::Alphanumeric, Rng};
-use std::collections::HashMap;
-use tokio::sync::Mutex;
+mod models;
+use models::*;
 
-use elogbook::get_db_collection;
-use elogbook::models::*;
+mod helpers;
+use helpers::*;
 
 #[derive(Deserialize)]
 struct GetEntriesParams {
@@ -124,6 +120,9 @@ async fn add_entry(mut payload: Multipart) -> impl Responder {
 async fn get_entries(params: web::Query<GetEntriesParams>) -> impl Responder {
     use futures_util::stream::TryStreamExt;
 
+    // Clear the download requests hash map asynchronously
+    clean_expired_download_request().await;
+
     let collection = get_db_collection()
         .await
         .expect("Failed to connect to the DB.");
@@ -146,14 +145,14 @@ async fn get_entries(params: web::Query<GetEntriesParams>) -> impl Responder {
         // Process attachments
         if let Some(attachments) = entry.attachments {
             for attachment in attachments {
-                // Make download URL
-                let download_url = generate_temporary_download_url(&attachment).await;
+                // Make download hash
+                let download_token = generate_temporary_download_url(&attachment).await;
                 // Don't pass the saved path to the frontend!
                 attachments_response.push(AttachmentResponse {
                     id: attachment.id,
                     mime: attachment.mime.clone(),
                     original_name: attachment.original_name,
-                    download_url: download_url,
+                    download_token,
                 });
             }
         }
@@ -170,61 +169,8 @@ async fn get_entries(params: web::Query<GetEntriesParams>) -> impl Responder {
     HttpResponse::Ok().json(results)
 }
 
-lazy_static! {
-    static ref DOWNLOAD_REQUESTS: Mutex<HashMap<String, DownloadRequest>> =
-        Mutex::new(HashMap::new());
-}
-
-// 一時的なダウンロードURLを生成
-async fn generate_temporary_download_url(attachment: &Attachment) -> String {
-    let token: String = rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(30)
-        .map(char::from)
-        .collect();
-
-    let expires_at = Utc::now() + Duration::minutes(1); // available 1min
-
-    let download_request = DownloadRequest {
-        token: token.clone(),
-        file_path: attachment.saved_path.clone(),
-        original_name: attachment.original_name.clone(),
-        expires_at: expires_at,
-    };
-
-    DOWNLOAD_REQUESTS
-        .lock()
-        .await
-        .insert(token.clone(), download_request);
-    format!("download/{}", token)
-}
-
-async fn download_file(req: HttpRequest, path: web::Path<String>) -> Result<HttpResponse, Error> {
-    let token = path.into_inner();
-    let requests = DOWNLOAD_REQUESTS.lock().await;
-
-    if let Some(request) = requests.get(&token) {
-        if Utc::now() < request.expires_at {
-            let named_file = NamedFile::open_async(&request.file_path).await?;
-
-            // Return the file with a meta data = the original name
-            return Ok(named_file
-                .use_last_modified(true)
-                .set_content_disposition(actix_web::http::header::ContentDisposition {
-                    disposition: actix_web::http::header::DispositionType::Attachment,
-                    parameters: vec![actix_web::http::header::DispositionParam::Filename(
-                        request.original_name.clone(),
-                    )],
-                })
-                .into_response(&req));
-        }
-    }
-
-    Ok(HttpResponse::NotFound().body("Link expired or invalid"))
-}
-
 async fn greet() -> impl Responder {
-    HttpResponse::Ok().body("Hello World!")
+    HttpResponse::Ok().body("Hello elogbook backend! Please use HTTP requests.")
 }
 
 #[actix_web::main]
