@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::Write;
 
-mod models;
+pub mod models;
 use models::*;
 
 mod helpers;
@@ -21,26 +21,30 @@ struct GetEntriesParams {
     offset: u64,
 }
 
-async fn add_entry(mut payload: Multipart) -> impl Responder {
-    // Prepare a vacant entry
+#[derive(Deserialize)]
+struct AddEntryParams {
+    log: Option<String>,
+}
+
+async fn add_entry(params: web::Query<AddEntryParams>, mut payload: Multipart) -> impl Responder {
+    // Prepare a vacant entry but accept 'log=' query for simplicity.
     let mut entry = Entry {
         id: None,
-        content: String::new(),
+        content: params.log.clone().unwrap_or_else(String::new),
         created_at: chrono::Utc::now(),
         attachments: None,
     };
+
     // Empty attachments
     let mut attachments = Vec::new();
 
-    while let Some(item) = payload.next().await {
+    while let Some(Ok(mut field)) = payload.next().await {
         use std::path::Path;
-
-        let mut field = item.expect("Error processing multipart field");
 
         let content_disposition = field.content_disposition().clone();
         let field_name = content_disposition.get_name().unwrap_or_default();
 
-        // Content
+        // Content (can be replaced with '?log=' query)
         if field_name == "content" {
             while let Some(chunk) = field.next().await {
                 entry.content.push_str(
@@ -52,11 +56,12 @@ async fn add_entry(mut payload: Multipart) -> impl Responder {
         else if field_name == "file" {
             let mime_type = field.content_type().to_string();
             let original_filename = content_disposition.get_filename().unwrap_or("tmpfile");
+            let tstamp = entry.created_at.naive_utc();
             let directory_path = format!(
                 "./attachments/{:04}/{:02}/{:02}",
-                entry.created_at.naive_utc().year(),
-                entry.created_at.naive_utc().month(),
-                entry.created_at.naive_utc().day()
+                tstamp.year(),
+                tstamp.month(),
+                tstamp.day()
             );
 
             // Make a unique (hashed) name
@@ -101,8 +106,13 @@ async fn add_entry(mut payload: Multipart) -> impl Responder {
             attachments.push(attachment);
         }
     }
-    if 0 < attachments.len() {
+    if !attachments.is_empty() {
         entry.attachments = Some(attachments);
+    }
+
+    if entry.content.is_empty() && entry.attachments.is_none() {
+        // No entries at all
+        return HttpResponse::InternalServerError().body("Error no log nor attachment entry");
     }
 
     // Insert this log entry
