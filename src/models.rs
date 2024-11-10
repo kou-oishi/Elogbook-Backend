@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Attachment {
@@ -41,8 +42,20 @@ pub struct EntryResponse {
 // For download files
 #[derive(Debug, Clone)]
 pub struct DownloadRequest {
-    pub token: String,
     pub file_path: String,
     pub original_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DownloadClient {
     pub expires_at: DateTime<Utc>,
+    pub requests: HashMap<String, DownloadRequest>,
+}
+impl DownloadClient {
+    pub fn new() -> Self {
+        Self {
+            expires_at: Utc::now(), // Tentative
+            requests: HashMap::new(),
+        }
+    }
 }

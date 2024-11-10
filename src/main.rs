@@ -19,6 +19,7 @@ use helpers::*;
 struct GetEntriesParams {
     limit: i64,
     offset: u64,
+    client: String,
 }
 
 #[derive(Deserialize)]
@@ -149,6 +150,8 @@ async fn get_entries(params: web::Query<GetEntriesParams>) -> impl Responder {
         .expect("Error finding entries.");
     let mut results = Vec::new();
 
+    // Client hash
+    let client_hash = params.client.clone();
     while let Some(entry) = cursor.try_next().await.expect("Error parsing entry") {
         let mut attachments_response = vec![];
 
@@ -156,7 +159,8 @@ async fn get_entries(params: web::Query<GetEntriesParams>) -> impl Responder {
         if let Some(attachments) = entry.attachments {
             for attachment in attachments {
                 // Make download hash
-                let download_token = generate_temporary_download_url(&attachment).await;
+                let download_token =
+                    generate_temporary_download_url(client_hash.clone(), &attachment).await;
                 // Don't pass the saved path to the frontend!
                 attachments_response.push(AttachmentResponse {
                     id: attachment.id,
@@ -185,22 +189,20 @@ async fn greet() -> impl Responder {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    //use actix_files as fs;
-
     HttpServer::new(|| {
         App::new()
             .wrap(
                 Cors::default()
-                    .allow_any_origin() // 必要であれば、特定のオリジンに限定することも可能
+                    .allow_any_origin()
                     .allow_any_method()
                     .allow_any_header()
                     .max_age(3600),
             )
-            //.service(fs::Files::new("/attachments", "./attachments").show_files_listing())
             .route("/", web::get().to(greet))
             .route("/add_entry", web::post().to(add_entry))
             .route("/get_entries", web::get().to(get_entries))
-            .route("/download/{token}", web::get().to(download_file))
+            .route("/download", web::get().to(download_file))
+            .route("/extend", web::post().to(extend_download_lifetime))
     })
     .bind("127.0.0.1:8080")?
     .run()
